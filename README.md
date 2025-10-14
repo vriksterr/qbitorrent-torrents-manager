@@ -81,7 +81,7 @@ BAD_EXTS=("iso" "exe" "scr")  # file types to remove
 ### Run in the background (24/7):
 
 ```bash
-nohup /usr/local/bin/auto_remove_bad_torrents.sh > /var/log/qb_cleanup.log 2>&1 &
+nohup /usr/local/bin/qbitorrent-monitor-delete.sh > /var/log/qb_cleanup.log 2>&1 &
 ```
 
 * Logs are written to `/var/log/qb_cleanup.log`
