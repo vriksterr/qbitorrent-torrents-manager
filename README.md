@@ -75,7 +75,7 @@ BAD_EXTS=("iso" "exe" "scr")  # file types to remove
 ### Run manually:
 
 ```bash
-/usr/local/bin/auto_remove_bad_torrents.sh
+/usr/local/bin/qbitorrent-monitor-delete.sh
 ```
 
 ### Run in the background (24/7):
@@ -146,7 +146,7 @@ MIT License – free to use and modify. No warranty provided.
 If you want, I can also create a **ready-to-push GitHub repo structure** with:
 
 * `README.md`
-* `auto_remove_bad_torrents.sh`
+* `qbitorrent-monitor-delete.sh`
 * `.gitignore` for logs
 
 Do you want me to do that?
