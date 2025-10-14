@@ -1,7 +1,3 @@
-Perfect ✅ — here’s a **GitHub-ready README** formatted with Markdown, including badges, code blocks, and proper sections. You can drop this as `README.md` in your repository.
-
----
-
 # 🧹 qBittorrent 24/7 Auto Cleanup Script
 
 ![Bash](https://img.shields.io/badge/Language-Bash-blue)
