@@ -1,14 +1,26 @@
 #!/bin/bash
+
+#First Running qbitorrent script that starts qbitorrent adding '&' runs the script in the background so the next command can start immediately. 'wait' keeps the parent script alive, waiting for both background scripts. For 24/7 scripts, this ensures the container or terminal doesn’t exit.
+./entrypoint.sh &
+sleep 10
+
+#Running qbitorrent-monitor-seed.sh to monitor seeds avg speed and delete inactive ones
+./config/qBittorrent/config/scripts/qbitorrent-monitor-seed.sh &
+
+#First installing JQ
+apk add jq
+sleep 10
+
 # -------------------------------------
 # qBittorrent 24/7 Auto Cleanup Script
 # -------------------------------------
 
-QBIT_HOST="http://<ip>:<port>"
-USERNAME="username"
-PASSWORD="password"
-DELETE_FILES=true          # Set to false if you want to keep the files
-CHECK_INTERVAL=60          # Time in seconds between checks
-BAD_EXTS=("iso" "exe" "scr")
+QBIT_HOST="http://localhost:20022"
+USERNAME=""
+PASSWORD=""
+DELETE_FILES=true          	# Set to false if you want to keep the files
+CHECK_INTERVAL=5          	# Time in seconds between checks
+BAD_EXTS=("iso" "exe" "scr") 	#Files type to delete
 COOKIE_JAR="/tmp/qb_cookie.txt"
 
 # Ensure jq is installed
