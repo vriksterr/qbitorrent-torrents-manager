@@ -1,157 +1,109 @@
 #!/usr/bin/env bash
+# -------------------------------------
+# qBittorrent Average Monitor + Delete ETA
+# -------------------------------------
 
 QBIT_HOST="http://localhost:20022"
 USERNAME=""
 PASSWORD=""
 
-CHECK_INTERVAL=2		# seconds
-UPLOAD_THRESHOLD_KBPS=100	# KB/s
-TIME_THRESHOLD_SEC=$((2*60*60))	# 6 hours
-
-STATE_FILE="/tmp/qbt_upload_tracker.json"
+CHECK_INTERVAL=1
+UPLOAD_THRESHOLD_KBPS=100
+TIME_THRESHOLD_SEC=$((72*60*60))  
+STATE_FILE="/tmp/qbt_avg_tracker.json"
 COOKIE_JAR="/tmp/qbt_cookie.txt"
 
-get_delete_behavior() {
-    case "$1" in
-        movies|series) echo true ;;
-        games)         echo false ;;
-        *)             echo false ;;
-    esac
-}
+ALPHA=$(awk "BEGIN {print 2/(($TIME_THRESHOLD_SEC/$CHECK_INTERVAL)+1)}")
 
-# ---- Ensure dependencies ----
-command -v jq >/dev/null || apk add --no-cache jq curl >/dev/null 2>&1
+[[ ! -f "$STATE_FILE" ]] && echo "{}" > "$STATE_FILE"
 
-# ---- Login (SAFE LOOP) ----
 login() {
-    echo "[*] Waiting for qBittorrent API..."
-
-    # Wait until API is reachable
-    while ! curl -s "$QBIT_HOST/api/v2/app/version" | grep -q '[0-9]'; do
-        sleep 2
-    done
-
-    echo "[*] Logging into qBittorrent..."
-
-    while true; do
-        RESPONSE=$(curl -s -c "$COOKIE_JAR" \
-            -d "username=$USERNAME" \
-            -d "password=$PASSWORD" \
-            "$QBIT_HOST/api/v2/auth/login")
-
-        if [[ "$RESPONSE" == "Ok." ]]; then
-            echo "[+] Logged in"
-            return
-        fi
-
-        echo "[!] Login failed, retrying..."
-        sleep 2
-    done
+    curl -s -c "$COOKIE_JAR" -d "username=$USERNAME" -d "password=$PASSWORD" "$QBIT_HOST/api/v2/auth/login" > /dev/null
 }
 
-# ---- API SAFE FETCH ----
-get_torrents() {
-    RESPONSE=$(curl -s -b "$COOKIE_JAR" "$QBIT_HOST/api/v2/torrents/info")
-
-    # Validate JSON
-    if echo "$RESPONSE" | jq empty >/dev/null 2>&1; then
-        echo "$RESPONSE"
-        return 0
-    else
-        return 1
+monitor() {
+    local RAW_DATA=$(curl -s -b "$COOKIE_JAR" "$QBIT_HOST/api/v2/torrents/info")
+    
+    if ! echo "$RAW_DATA" | jq empty 2>/dev/null; then
+        login
+        return
     fi
-}
 
-delete_torrent() {
-    local HASH="$1"
-    local NAME="$2"
-    local DELETE_FILES="$3"
+    local TMP_STATE=$(mktemp)
+    echo "{}" > "$TMP_STATE"
+    local NOW=$(date +%s)
 
-    echo "[-] Deleting: $NAME | delete_files=$DELETE_FILES"
-    curl -s -b "$COOKIE_JAR" \
-        -d "hashes=$HASH" \
-        -d "deleteFiles=$DELETE_FILES" \
-        "$QBIT_HOST/api/v2/torrents/delete" >/dev/null
-}
+    local HASHES=$(echo "$RAW_DATA" | jq -r '.[] | 
+        select(.category | ascii_downcase | test("movies|series")) | 
+        select(.private == false and .force_start == false) | 
+        select(.progress == 1) | 
+        select(.tags == "") | 
+        select(.state | ascii_downcase | test("uploading|stalledup|forcedup")) | 
+        .hash')
 
-monitor_uploads() {
-    [[ ! -f "$STATE_FILE" ]] && echo "{}" > "$STATE_FILE"
-    echo "{}" > /tmp/qbt_new_state.json
+    echo "--- Public Seeding Monitor ($(date +%H:%M:%S)) ---"
 
-    TORRENTS=$(get_torrents) || {
-        echo "[!] API not ready / invalid response"
-        return 1
-    }
+    for HASH in $HASHES; do
+        local ITEM=$(echo "$RAW_DATA" | jq -c ".[] | select(.hash == \"$HASH\")")
+        local NAME=$(echo "$ITEM" | jq -r '.name')
+        local CUR_SPEED=$(( $(echo "$ITEM" | jq -r '.upspeed') / 1024 ))
+        local CAT=$(echo "$ITEM" | jq -r '.category | ascii_downcase')
+        
+        local STATS=$(jq -r --arg h "$HASH" '.[$h] // {"avg_speed": -1, "first_seen": 0}' "$STATE_FILE")
+        local PREV_AVG=$(echo "$STATS" | jq -r '.avg_speed')
+        local FIRST_SEEN=$(echo "$STATS" | jq -r '.first_seen')
 
-    echo "$TORRENTS" | jq -c '.[]' | while read -r torrent; do
-        CATEGORY=$(jq -r '.category' <<<"$torrent" | tr '[:upper:]' '[:lower:]')
-        STATE=$(jq -r '.state' <<<"$torrent" | tr '[:upper:]' '[:lower:]')
-        HASH=$(jq -r '.hash' <<<"$torrent")
-        NAME=$(jq -r '.name' <<<"$torrent")
-        UP_SPEED=$(jq -r '.upspeed' <<<"$torrent")
-        PRIVATE=$(jq -r '.private' <<<"$torrent")
-        FORCE=$(jq -r '.force_start' <<<"$torrent")
-
-        [[ ! "$CATEGORY" =~ ^(movies|series|games)$ ]] && continue
-        [[ "$PRIVATE" == "true" || "$PRIVATE" == "1" ]] && continue
-        [[ "$FORCE" == "true" || "$FORCE" == "1" ]] && continue
-        [[ ! "$STATE" =~ ^(uploading|stalledup)$ ]] && continue
-
-        PREV=$(jq -r --arg h "$HASH" '.[$h] // {}' "$STATE_FILE")
-        PREV_BYTES=$(jq -r '.bytes_uploaded // 0' <<<"$PREV")
-        PREV_TIME=$(jq -r '.time_sec // 0' <<<"$PREV")
-        PREV_LOW=$(jq -r '.low_speed_time // 0' <<<"$PREV")
-
-        BYTES_THIS_INTERVAL=$((UP_SPEED * CHECK_INTERVAL))
-        TOTAL_BYTES=$((PREV_BYTES + BYTES_THIS_INTERVAL))
-        TOTAL_TIME=$((PREV_TIME + CHECK_INTERVAL))
-
-        SPEED_KBPS=$((UP_SPEED / 1024))
-
-        if (( SPEED_KBPS < UPLOAD_THRESHOLD_KBPS )); then
-            LOW_SPEED_TIME=$((PREV_LOW + CHECK_INTERVAL))
+        local NEW_AVG
+        if [[ "$PREV_AVG" == "-1" ]]; then
+            NEW_AVG=$CUR_SPEED
+            FIRST_SEEN=$NOW
         else
-            LOW_SPEED_TIME=0
+            NEW_AVG=$(awk "BEGIN {print ($ALPHA * $CUR_SPEED) + ((1 - $ALPHA) * $PREV_AVG)}")
         fi
 
-        AVG_KBPS=0
-        if (( TOTAL_TIME > 0 )); then
-            AVG_KBPS=$(( (TOTAL_BYTES / TOTAL_TIME) / 1024 ))
+        local TRACKING_DURATION=$(( NOW - FIRST_SEEN ))
+        local STATUS_STR=""
+
+        if (( TRACKING_DURATION > TIME_THRESHOLD_SEC )); then
+            if (( $(awk "BEGIN {print ($NEW_AVG < $UPLOAD_THRESHOLD_KBPS)}") )); then
+                local DEL_FILES="false"
+                [[ "$CAT" =~ ^(movies|series)$ ]] && DEL_FILES="true"
+                echo "[!!!] REMOVING: $NAME"
+                curl -s -b "$COOKIE_JAR" -d "hashes=$HASH" -d "deleteFiles=$DEL_FILES" "$QBIT_HOST/api/v2/torrents/delete"
+                continue
+            fi
+            
+            # Calculate ETA (How long until Average drops to threshold if current speed stays same)
+            if (( CUR_SPEED < UPLOAD_THRESHOLD_KBPS )); then
+                # Math: Steps = log((Threshold - Speed)/(Avg - Speed)) / log(1 - Alpha)
+                # Simplified linear approximation for shell:
+                ETA_MINS=$(awk "BEGIN { 
+                    if ($NEW_AVG > $UPLOAD_THRESHOLD_KBPS) {
+                        mins = (log(($UPLOAD_THRESHOLD_KBPS - $CUR_SPEED)/($NEW_AVG - $CUR_SPEED)) / log(1 - $ALPHA)) * ($CHECK_INTERVAL / 60);
+                        printf \"%dm\", mins
+                    } else { printf \"0m\" }
+                }")
+                STATUS_STR="[DEL IN ${ETA_MINS}]"
+            else
+                STATUS_STR="[SAFE]"
+            fi
+        else
+            REMAINING=$(( (TIME_THRESHOLD_SEC - TRACKING_DURATION) / 60 ))
+            STATUS_STR="[WARM ${REMAINING}m]"
         fi
 
-        if (( LOW_SPEED_TIME >= TIME_THRESHOLD_SEC && AVG_KBPS < UPLOAD_THRESHOLD_KBPS )); then
-            DELETE_FILES=$(get_delete_behavior "$CATEGORY")
-            echo "[!] Removing '$NAME' | avg=${AVG_KBPS}KB/s | low-speed 2h"
-            delete_torrent "$HASH" "$NAME" "$DELETE_FILES"
-            continue
-        fi
+        printf "%-15s %-40.40s | Avg: %7.1f KB/s | Cur: %4d KB/s\n" "$STATUS_STR" "$NAME" "$NEW_AVG" "$CUR_SPEED"
 
-        jq --arg h "$HASH" \
-           --argjson b "$TOTAL_BYTES" \
-           --argjson t "$TOTAL_TIME" \
-           --argjson l "$LOW_SPEED_TIME" \
-           '. + {($h): {"bytes_uploaded": $b, "time_sec": $t, "low_speed_time": $l}}' \
-           /tmp/qbt_new_state.json > /tmp/qbt_tmp.json && mv /tmp/qbt_tmp.json /tmp/qbt_new_state.json
+        local UPDATED_STATE=$(jq --arg h "$HASH" --argjson a "$NEW_AVG" --argjson f "$FIRST_SEEN" \
+            '. + {($h): {"avg_speed": $a, "first_seen": $f}}' "$TMP_STATE")
+        echo "$UPDATED_STATE" > "$TMP_STATE"
     done
 
-    mv /tmp/qbt_new_state.json "$STATE_FILE"
+    mv "$TMP_STATE" "$STATE_FILE"
 }
 
-main() {
-    login
-    echo "[*] Monitoring torrents..."
-
-    while true; do
-        echo "--------------------------------------"
-        echo "[*] Check @ $(date)"
-
-        if ! monitor_uploads; then
-            echo "[!] Reconnecting..."
-            login
-        fi
-
-        sleep "$CHECK_INTERVAL"
-    done
-}
-
-main
+login
+while true; do
+    monitor
+    sleep "$CHECK_INTERVAL"
+done
